@@ -77,3 +77,36 @@ def _get_daily_fx_forward(start_dt: pd.Timestamp=None, end_dt: pd.Timestamp=None
         filtered_df = filtered_df.pivot(index='asof_dt', columns='currency', values='forward')
 
     return filtered_df
+
+def _get_daily_fx_carry(start_dt: pd.Timestamp=None, end_dt: pd.Timestamp=None, ccys: list=None, tenor_days: int=90, pivot: bool=False) -> pd.DataFrame:
+    """
+    Retrieve daily FX carry from Parquet file for given date range, currencies, and tenor.
+
+    Args:
+        start_dt: Start date as pandas Timestamp.
+        end_dt: End date as pandas Timestamp.
+        ccys: List of currency ISO codes to filter.
+        tenor_days: Tenor in days (default is 90 for 3M carry).       
+        pivot: If True, pivot the DataFrame to have currencies as columns.
+    
+    Returns:
+        DataFrame with columns: ['asof_dt', 'currency', 'carry']
+    """
+    parquet_file = r"C:\Users\AK\Documents\Quant\quant-research-prototype\data\features\fx\daily\fx_carry.parquet"
+    df = pd.read_parquet(parquet_file)
+
+    if start_dt is None:
+        start_dt = df['asof_dt'].min()
+    if end_dt is None:
+        end_dt = df['asof_dt'].max()
+    if ccys is None:
+        ccys = df['currency'].unique().tolist()
+
+    # Filter by date range, currencies, and tenor
+    mask = (df['asof_dt'] >= start_dt) & (df['asof_dt'] <= end_dt) & (df['currency'].isin(ccys)) & (df['tenor_days'] == tenor_days)
+    filtered_df = df.loc[mask, ['asof_dt', 'currency', 'carry']]
+
+    if pivot:
+        filtered_df = filtered_df.pivot(index='asof_dt', columns='currency', values='carry')
+
+    return filtered_df
