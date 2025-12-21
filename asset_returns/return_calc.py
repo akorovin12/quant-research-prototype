@@ -1,7 +1,7 @@
-import polars as pl
+import pandas as pd
 import numpy as np
-import data_loader.fx_loader as fxl
-from utils.data_utils import append_or_create_parquet
+from utils import data_utils as du, data_reader as dr
+
 
 
 def calc_fx_total_return(spot_t_minus_n, spot_t, carry_t_minus_n, carry_t, n_days=1, tenor='3M'):
@@ -59,62 +59,38 @@ def fx_return_to_parquet(start_dt=None, end_dt=None, ccys=None,tenor='3M', n_day
     Returns:
         None: The function saves the calculated FX return data to a Parquet file.
     """
-    output_parquet_file = r"C:\Users\AK\Documents\Quant\quant-research-prototype\data\processed\daily\asset_returns\fx_return.parquet"
+    output_parquet_file = r"C:\Users\AK\Documents\Quant\quant-research-prototype\data\asset_returns\daily\fx_return.parquet"
     
     # Get spot data
-    spot_df = fxl._get_daily_fx_spot(start_dt=start_dt, end_dt=end_dt, ccys=ccys)
-    spot_df = spot_df.rename({"close": "spot"})
-
+    spot_df = dr._get_daily_fx_spot(start_dt=start_dt, end_dt=end_dt, ccys=ccys)
+    
     # Get carry data (3M carry only for now)
-    carry_df = fxl._get_daily_fx_carry(start_dt=start_dt, end_dt=end_dt, tenor_days=90, ccys=ccys)
+    carry_df = dr._get_daily_fx_carry(start_dt=start_dt, end_dt=end_dt, tenor_days=90, ccys=ccys)
 
     # Merge spot and carry data on date and iso
-    merged_df = spot_df.join(carry_df, on=['date', 'iso','year'], how='inner')
-
-    # Backfill missing values with previous days values to ensure continuity in the data
-    merged_df = merged_df.sort(['iso', 'date']).with_columns(
-                    [pl.col(col).fill_null(strategy='forward').over(
-                        ['iso']) for col in merged_df.columns if col not in ['iso', 'date']])
-    
-    # If still missing values, drop those rows as they cannot be calculated for returns
-    merged_df = merged_df.drop_nulls(subset=['spot', 'carry'])
+    merged_df = spot_df.merge(carry_df, left_on=['asof_dt', 'currency'],right_on=['asof_dt','currency'], how='inner')
 
     # Calculate lagged values for spot and carry
-    merged_df = merged_df.with_columns([
-        pl.col('spot').shift(n_days).alias('spot_t_minus_n'),
-        pl.col('carry').shift(n_days).alias('carry_t_minus_n')
-    ])
-
-    # Drop rows with null values in lagged columns
-    merged_df = merged_df.drop_nulls(subset=['spot_t_minus_n', 'carry_t_minus_n'])
+    dateidx = pd.DataFrame(data=merged_df.asof_dt.unique(),columns=['asof_dt'])
+    dateidx['asof_dt_prev']=dateidx.asof_dt.shift(n_days)
+    merged_df = merged_df.merge(dateidx,left_on=['asof_dt'],right_on=['asof_dt'],how='left')
+    merged_df = merged_df.merge(merged_df[['asof_dt','currency','spot','carry']],left_on=['asof_dt_prev','currency'],right_on=['asof_dt','currency'],how='left',suffixes=('','_prev'))
 
     # Calculate returns
-    merged_df = merged_df.with_columns(
-        pl.struct(['spot_t_minus_n', 'spot', 'carry_t_minus_n', 'carry']).map_elements(
-            lambda s: calc_fx_total_return(
-                s['spot_t_minus_n'], s['spot'], s['carry_t_minus_n'], s['carry'], 
-                n_days=n_days, tenor=tenor
-            ),
-            return_dtype=pl.List(pl.Float64)  # Since your function returns a list of floats
-        ).alias("returns")
-    ).with_columns([
-        pl.col("returns").list.get(0).alias("spot_return"),
-        pl.col("returns").list.get(1).alias("carry_return"),
-        pl.col("returns").list.get(2).alias("total_return")
-    ]).drop("returns")
-
-    # Select only relevant columns for output
-    merged_df = merged_df.select([
-        pl.col('date'),       
-        pl.col('iso'),
-        pl.col('tenor_days'),
-        pl.col('spot_return'),
-        pl.col('carry_return'),
-        pl.col('total_return'),
-        pl.col('year')])
+    merged_df[['spot_return','carry_return','total_return']] = merged_df.apply(
+        lambda row: pd.Series(calc_fx_total_return(
+            spot_t_minus_n=row['spot_prev'],
+            spot_t=row['spot'],
+            carry_t_minus_n=row['carry_prev'],
+            carry_t=row['carry'],
+        )), axis=1)
+    
+    merged_df.dropna(inplace=True)
+    merged_df['year']=merged_df['asof_dt'].dt.year
+    merged_df = merged_df[['asof_dt','currency','spot_return','carry_return','total_return','year']]
     
     # Save to Parquet
-    append_or_create_parquet(merged_df, output_parquet_file, key_fields=['date', 'iso','year'])
+    du.append_or_create_parquet(merged_df, output_parquet_file, key_fields=['asof_dt', 'currency','year'])
     print (f"FX return data for inputs tenor={tenor}, n_days={n_days}, start_dt={start_dt}, end_dt={end_dt}, ccys={ccys} saved to Parquet successfully.")
     return
     
